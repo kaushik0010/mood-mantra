@@ -3,53 +3,49 @@ import { useState, useRef } from "react";
 export function useAudioRecorder() {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
+  const [stream, setStream] = useState<MediaStream | null>(null); // <--- NEW STATE
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
   const startRecording = async () => {
     try {
-      // 1. Request Microphone Access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      // 2. Setup Recorder
-      // We use 'audio/webm' because it is standard for web browsers.
-      // Vertex AI accepts WebM directly.
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = []; // Reset chunks
+      const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      setStream(mediaStream); // <--- Save the stream
 
-      // 3. Listen for data
+      const mediaRecorder = new MediaRecorder(mediaStream, { mimeType: "audio/webm" });
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) chunksRef.current.push(event.data);
       };
 
-      // 4. Handle Stop
       mediaRecorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
         setAudioBlob(blob);
         
-        // Stop all tracks to release microphone (turn off red light)
-        stream.getTracks().forEach((track) => track.stop());
+        // CRITICAL: Do NOT stop the stream tracks here if you want fast restart.
+        // But for safety/cleanup, we usually do. Let's keep it clean for now:
+        mediaStream.getTracks().forEach((track) => track.stop());
+        setStream(null); // Clear stream on stop
       };
 
       mediaRecorder.start();
       setIsRecording(true);
-      setAudioBlob(null); // Clear previous recording
+      setAudioBlob(null);
 
     } catch (error) {
       console.error("Error accessing microphone:", error);
-      alert("Microphone access denied. Please enable permissions.");
+      alert("Microphone access denied.");
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
     }
   };
 
-  return { isRecording, startRecording, stopRecording, audioBlob };
+  return { isRecording, startRecording, stopRecording, audioBlob, stream }; // <--- Return stream
 }

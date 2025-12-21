@@ -1,9 +1,23 @@
-// Add ': Promise<string>' here 👇
-export async function sendAudioToVertex(audioBlob: Blob): Promise<string> {
+// services/api.ts
+
+// 1. Update the Interface to match the new Backend Response
+interface ChatResponse {
+  reply: string;
+  voiceId: string;
+  transcript: string;
+  mode: 'THERAPIST' | 'INTERVIEWER'; // <--- NEW
+  isCrisis: boolean;                 // <--- NEW
+}
+
+interface Message {
+  role: 'user' | 'model';
+  text: string;
+}
+
+export async function sendAudioToVertex(audioBlob: Blob, history: Message[]): Promise<ChatResponse> {
   const reader = new FileReader();
   
-  // Add '<string>' generic to the Promise constructor 👇
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<ChatResponse>((resolve, reject) => {
     reader.readAsDataURL(audioBlob);
     
     reader.onloadend = async () => {
@@ -15,7 +29,7 @@ export async function sendAudioToVertex(audioBlob: Blob): Promise<string> {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
             audio: base64Audio,
-            mimeType: 'audio/webm' 
+            history: history 
           }),
         });
 
@@ -25,8 +39,14 @@ export async function sendAudioToVertex(audioBlob: Blob): Promise<string> {
           throw new Error(data.error);
         }
 
-        // TypeScript now knows this must be a string
-        resolve(data.reply);
+        // 2. Resolve the full object
+        resolve({ 
+          reply: data.reply, 
+          voiceId: data.voiceId,
+          transcript: data.transcript,
+          mode: data.mode,      // <--- Pass through
+          isCrisis: data.isCrisis // <--- Pass through
+        });
       } catch (error) {
         reject(error);
       }

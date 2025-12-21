@@ -1,5 +1,6 @@
 import { VertexAI } from '@google-cloud/vertexai';
 import { NextResponse } from 'next/server';
+import { getVoiceId } from '@/config/voices';
 
 const vertex_ai = new VertexAI({
   project: process.env.GCP_PROJECT_ID,
@@ -7,41 +8,97 @@ const vertex_ai = new VertexAI({
 });
 
 const model = vertex_ai.preview.getGenerativeModel({
-  model: 'gemini-2.5-flash', // Flash supports Audio!
+  model: 'gemini-2.5-flash', // Switched to 1.5 Flash for better instruction following
+  generationConfig: {
+    responseMimeType: "application/json",
+    temperature: 0.7,
+  },
 });
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    
-    // Check if we received Audio or Text
+    const { message, audio, history } = await req.json();
     const userParts = [];
+
+    const SYSTEM_INSTRUCTION = `
+    ROLE: You are 'Mood-Mantra', an advanced AI that can switch between TWO modes based on user intent.
+
+    MODES:
+    1. THERAPIST (Default): Empathetic, warm, listens to feelings. Use this if user talks about emotions, life, stress, or sadness.
+    2. INTERVIEWER: Professional, strict but fair. Use this ONLY if user explicitly asks for "Interview Prep", "Mock Interview", or mentions "Job Application practice".
+
+    CRISIS PROTOCOL (HIGHEST PRIORITY):
+    - If user mentions suicide, self-harm, or extreme danger:
+      1. Set 'is_crisis' to true.
+      2. Reply SHORTLY and URGENTLY providing help.
+      3. Do NOT act like a fun friend. Be a serious guardian.
+
+    TASK:
+    1. ANALYZE AUDIO & HISTORY to detect current Intent (Therapy vs Interview).
+    2. DETECT LANGUAGE (Hindi/Marathi/English).
+    3. GENERATE RESPONSE:
+       - If Therapist: Be comforting.
+       - If Interviewer: Ask a relevant technical or behavioral question.
     
-    if (body.audio) {
-      // CASE 1: Audio Input
-      userParts.push({
-        inlineData: {
-          mimeType: body.mimeType || 'audio/webm',
-          data: body.audio
-        }
-      });
-      // Add a System Prompt to guide the Audio analysis
-      userParts.push({
-        text: "System: You are Mood-Mantra. Listen to the user's voice. Detect their emotion. Reply in the same language they spoke. Be brief and supportive."
-      });
+    OUTPUT JSON FORMAT ONLY:
+    {
+      "transcript": "User's exact words",
+      "reply": "Your response (in Devanagari if Hindi/Marathi)",
+      "detected_mode": "THERAPIST" | "INTERVIEWER",
+      "is_crisis": boolean,
+      "persona_needed": {
+        "gender": "male" | "female",
+        "age": "adult",
+        "accent": "indian" | "american"
+      }
+    }
+    `;
+
+    // History Formatting
+    const formattedHistory = (history || []).map((msg: any) => ({
+      role: msg.role,
+      parts: [{ text: msg.text }]
+    }));
+
+    const chat = model.startChat({ history: formattedHistory });
+
+    if (audio) {
+      userParts.push({ inlineData: { mimeType: 'audio/webm', data: audio } });
     } else {
-      // CASE 2: Text Input (Fallback)
-      userParts.push({ text: body.message || "Hello" });
+      userParts.push({ text: message || "." });
+    }
+    userParts.push({ text: SYSTEM_INSTRUCTION });
+
+    const result = await chat.sendMessage(userParts);
+    const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    let parsedResponse;
+    try {
+      parsedResponse = JSON.parse(responseText || "{}");
+    } catch (e) {
+      parsedResponse = { 
+        reply: "I am having trouble understanding. Could you speak again?", 
+        transcript: "",
+        detected_mode: "THERAPIST",
+        is_crisis: false,
+        persona_needed: { gender: 'female', age: 'adult', accent: 'indian' }
+      };
     }
 
-    // Start Generation
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: userParts }]
+    // Dynamic Voice Selection
+    // If it's an Interview, maybe force a specific 'Professional' voice?
+    // For now, we stick to the smart registry.
+    const needs = parsedResponse.persona_needed || { gender: 'female', age: 'adult', accent: 'indian' };
+    const selectedVoiceId = getVoiceId(needs.gender, needs.age, needs.accent);
+
+    return NextResponse.json({ 
+      success: true, 
+      reply: parsedResponse.reply,
+      voiceId: selectedVoiceId,
+      transcript: parsedResponse.transcript,
+      mode: parsedResponse.detected_mode, // Sending mode back to UI
+      isCrisis: parsedResponse.is_crisis    // Sending crisis flag back
     });
-
-    const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    return NextResponse.json({ success: true, reply: responseText });
 
   } catch (error: any) {
     console.error("Vertex AI Error:", error);
