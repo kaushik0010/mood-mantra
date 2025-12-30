@@ -53,7 +53,7 @@ Built for the "Next Billion Users," it supports vernacular context (Hindi/Marath
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/yourusername/mood-mantra.git](https://github.com/yourusername/mood-mantra.git)
+    git clone https://github.com/kaushik0010/mood-mantra.git
     cd mood-mantra
     ```
 
