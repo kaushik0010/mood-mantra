@@ -1,51 +1,69 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from 'react';
 
 export function useAudioRecorder() {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
-  const [stream, setStream] = useState<MediaStream | null>(null); // <--- NEW STATE
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
-  const startRecording = async () => {
+  const startRecording = useCallback(async () => {
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      setStream(mediaStream); // <--- Save the stream
+      // PRO AUDIO CONSTRAINTS
+      // This tells the browser: "We are doing a call, turn on the Echo Canceller"
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,      // <--- THE KEY FIX
+          noiseSuppression: true,      // Removes background fan noise
+          autoGainControl: true,       // Normalizes volume
+          sampleRate: 16000,           // Standard for Speech-to-Text
+        } 
+      });
 
-      const mediaRecorder = new MediaRecorder(mediaStream, { mimeType: "audio/webm" });
+      setStream(stream);
+
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus' 
+      });
+
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
       };
 
       mediaRecorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
         setAudioBlob(blob);
-        
-        // CRITICAL: Do NOT stop the stream tracks here if you want fast restart.
-        // But for safety/cleanup, we usually do. Let's keep it clean for now:
-        mediaStream.getTracks().forEach((track) => track.stop());
-        setStream(null); // Clear stream on stop
+        // Important: Keep the stream open if we want to support "Barge-in" 
+        // monitoring without requesting permission again.
+        // But for "Stop and Send" logic, standard cleanup is usually fine.
       };
 
       mediaRecorder.start();
       setIsRecording(true);
-      setAudioBlob(null);
 
     } catch (error) {
       console.error("Error accessing microphone:", error);
-      alert("Microphone access denied.");
+      alert("Microphone access denied. Please allow it to use the app.");
     }
-  };
+  }, []);
 
-  const stopRecording = () => {
+  const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
+      
+      // OPTIONAL: Don't kill the stream immediately if you want smooth restarting
+      // But for now, let's keep it clean.
+      // stream?.getTracks().forEach(track => track.stop()); 
+      // setStream(null); 
     }
-  };
+  }, []);
 
-  return { isRecording, startRecording, stopRecording, audioBlob, stream }; // <--- Return stream
+  return { isRecording, startRecording, stopRecording, audioBlob, stream };
 }

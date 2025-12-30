@@ -35,6 +35,10 @@ yarn-error.log*
 .env.local
 service-account.json
 
+public/sw.js
+public/workbox-*.js
+public/worker-*.js
+
 # vercel
 .vercel
 

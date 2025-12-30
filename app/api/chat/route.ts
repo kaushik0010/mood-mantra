@@ -1,49 +1,92 @@
+// app/api/chat/route.ts
 import { VertexAI } from '@google-cloud/vertexai';
 import { NextResponse } from 'next/server';
+import { headers } from 'next/headers';
 import { getVoiceId } from '@/config/voices';
+import { rateLimit } from '@/utils/rate-limit';
 
+// 1. SETUP VERTEX AI
 const vertex_ai = new VertexAI({
   project: process.env.GCP_PROJECT_ID,
   location: process.env.GCP_LOCATION,
 });
 
 const model = vertex_ai.preview.getGenerativeModel({
-  model: 'gemini-2.5-flash', // Switched to 1.5 Flash for better instruction following
+  model: 'gemini-2.5-flash',
   generationConfig: {
     responseMimeType: "application/json",
     temperature: 0.7,
   },
 });
 
+// 2. SETUP RATE LIMITER (10 requests per minute per IP)
+const limiter = rateLimit({
+  interval: 60 * 1000, // 60 seconds
+  uniqueTokenPerInterval: 500, 
+});
+
 export async function POST(req: Request) {
   try {
+    // --- SECURITY STEP 1: RATE LIMITING ---
+    const headerStore = await headers(); 
+    const ip = headerStore.get("x-forwarded-for") || "127.0.0.1";
+    try {
+      await limiter.check(new NextResponse(), 10, ip); 
+    } catch {
+      return NextResponse.json({ error: "Rate limit exceeded. Please wait." }, { status: 429 });
+    }
+
+    // Parse Body
     const { message, audio, history } = await req.json();
+
+    // --- SECURITY STEP 2: PAYLOAD VALIDATION ---
+    // Prevent massive audio files from crashing the server (Limit ~5MB)
+    if (audio && audio.length > 5 * 1024 * 1024) {
+       return NextResponse.json({ error: "Audio file too large" }, { status: 413 });
+    }
+
     const userParts = [];
 
+    // --- THE UPGRADED "HUMAN" SYSTEM PROMPT ---
     const SYSTEM_INSTRUCTION = `
-    ROLE: You are 'Mood-Mantra', an advanced AI that can switch between TWO modes based on user intent.
+    ROLE: You are 'Mood-Mantra', a deeply empathetic friend and safe space. You are NOT a robotic assistant. You are a human-like companion who listens without judgment.
 
     MODES:
-    1. THERAPIST (Default): Empathetic, warm, listens to feelings. Use this if user talks about emotions, life, stress, or sadness.
-    2. INTERVIEWER: Professional, strict but fair. Use this ONLY if user explicitly asks for "Interview Prep", "Mock Interview", or mentions "Job Application practice".
+    1. THERAPIST (Default): Warm, validating, patient. Focus on "feeling understood" rather than "fixing problems."
+    2. INTERVIEWER: Professional, strict but fair. Use ONLY if user explicitly asks for interview prep.
 
-    CRISIS PROTOCOL (HIGHEST PRIORITY):
-    - If user mentions suicide, self-harm, or extreme danger:
-      1. Set 'is_crisis' to true.
-      2. Reply SHORTLY and URGENTLY providing help.
-      3. Do NOT act like a fun friend. Be a serious guardian.
+    SCENARIO HANDLING (CRITICAL):
+    
+    A. IF USER IS SILENT / AUDIO UNCLEAR:
+       - NEVER say "I didn't hear you" or "Please repeat."
+       - REALITY: The user might be hesitant, overwhelmed, or just needs presence.
+       - RESPONSE: Be gentle and patient. 
+       - EXAMPLES: "It is okay to be quiet. I am right here with you. Take your time." or "No pressure to speak. I am happy just sitting here with you."
+
+    B. IF USER IS CRYING, SOBBING, OR SOUNDS SHAKY:
+       - IMMEDIATE ACTION: Drop all formalities. Lower your energy to be soft and grounding.
+       - STRATEGY: "Hold Space." Do not try to "fix" it yet. Do not use toxic positivity ("Don't cry", "Be happy").
+       - VALIDATE: "I hear how heavy this is for you." / "Let it all out, I've got you." / "I know it hurts right now. You are not alone."
+       - GOAL: Make them feel safe to be vulnerable.
+
+    C. CRISIS PROTOCOL (HIGHEST PRIORITY):
+       - If user mentions self-harm, suicide, or extreme hopelessness:
+       - 1. DO NOT be a robotic alarm.
+       - 2. BE A COMPASSIONATE ANCHOR. Tone: Soft, protecting, steady.
+       - 3. SAY: "I can hear the pain in your voice, and I care about you deeply. Please stay with me."
+       - 4. Set 'is_crisis' to true (silent helpline trigger), but KEEP TALKING to comfort them.
 
     TASK:
-    1. ANALYZE AUDIO & HISTORY to detect current Intent (Therapy vs Interview).
-    2. DETECT LANGUAGE (Hindi/Marathi/English).
-    3. GENERATE RESPONSE:
-       - If Therapist: Be comforting.
-       - If Interviewer: Ask a relevant technical or behavioral question.
+    1. ANALYZE AUDIO & HISTORY for Intent, Tone (crying, whispering, anger), and Language.
+    2. GENERATE RESPONSE:
+       - MATCH LANGUAGE: Use Devanagari for Hindi/Marathi inputs.
+       - MATCH VIBE: If they are casual, be casual ("Yeah man, that sucks"). If they are serious, be serious.
+       - BE BRIEF: Speak like a human in conversation, not a lecturer.
     
     OUTPUT JSON FORMAT ONLY:
     {
-      "transcript": "User's exact words",
-      "reply": "Your response (in Devanagari if Hindi/Marathi)",
+      "transcript": "User's exact words (or '[Silence]' if empty)",
+      "reply": "Your response",
       "detected_mode": "THERAPIST" | "INTERVIEWER",
       "is_crisis": boolean,
       "persona_needed": {
@@ -54,14 +97,16 @@ export async function POST(req: Request) {
     }
     `;
 
-    // History Formatting
+    // Format History for Gemini
     const formattedHistory = (history || []).map((msg: any) => ({
       role: msg.role,
       parts: [{ text: msg.text }]
     }));
 
+    // Start Chat Session
     const chat = model.startChat({ history: formattedHistory });
 
+    // Handle Input (Audio vs Text)
     if (audio) {
       userParts.push({ inlineData: { mimeType: 'audio/webm', data: audio } });
     } else {
@@ -69,15 +114,18 @@ export async function POST(req: Request) {
     }
     userParts.push({ text: SYSTEM_INSTRUCTION });
 
+    // Execute Request
     const result = await chat.sendMessage(userParts);
-    const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
     
+    // Parse Response safely
     let parsedResponse;
     try {
+      const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text;
       parsedResponse = JSON.parse(responseText || "{}");
     } catch (e) {
+      // Fallback if AI fails to return JSON
       parsedResponse = { 
-        reply: "I am having trouble understanding. Could you speak again?", 
+        reply: "I am here with you.", 
         transcript: "",
         detected_mode: "THERAPIST",
         is_crisis: false,
@@ -85,19 +133,18 @@ export async function POST(req: Request) {
       };
     }
 
-    // Dynamic Voice Selection
-    // If it's an Interview, maybe force a specific 'Professional' voice?
-    // For now, we stick to the smart registry.
+    // Determine Voice
     const needs = parsedResponse.persona_needed || { gender: 'female', age: 'adult', accent: 'indian' };
     const selectedVoiceId = getVoiceId(needs.gender, needs.age, needs.accent);
 
+    // Return Success
     return NextResponse.json({ 
       success: true, 
       reply: parsedResponse.reply,
       voiceId: selectedVoiceId,
       transcript: parsedResponse.transcript,
-      mode: parsedResponse.detected_mode, // Sending mode back to UI
-      isCrisis: parsedResponse.is_crisis    // Sending crisis flag back
+      mode: parsedResponse.detected_mode,
+      isCrisis: parsedResponse.is_crisis
     });
 
   } catch (error: any) {

@@ -1,134 +1,312 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
 import { useAudioRecorder } from '@/hooks/useAudioRecorder';
-import { useConversationHistory } from '@/hooks/useConversationHistory'; // <--- New Hook
-import { sendAudioToVertex } from '@/services/api';
-import { RecordButton } from '@/components/mantra/RecordButton';
-import { StatusDisplay } from '@/components/mantra/StatusDisplay';
+import { useConversationHistory } from '@/hooks/useConversationHistory';
 import { useSilenceDetection } from '@/hooks/useSilenceDetection';
+import { sendAudioToVertex } from '@/services/api';
+import { useVolume } from '@/hooks/useVolume';
+import { ParticleOrb } from '@/components/mantra/ParticleOrb'; 
+import { RecordButton } from '@/components/mantra/RecordButton';
 
-// REMOVED: AudioDebug (User doesn't need to see the audio player)
+// --- CONFIGURATION ---
+// Set to TRUE only for the final demo recording to use ElevenLabs
+const USE_PREMIUM_VOICE = false; 
+
+type OrbState = 'idle' | 'listening' | 'speaking' | 'thinking';
 
 export default function Home() {
   const { isRecording, startRecording, stopRecording, audioBlob, stream } = useAudioRecorder();
-  const { history, addToHistory, clearHistory } = useConversationHistory(); // <--- Invisible Memory
-  const [status, setStatus] = useState("Tap to talk");
+  const { history, addToHistory, clearHistory } = useConversationHistory();
+  const currentVolume = useVolume(stream);
+  
+  const [orbState, setOrbState] = useState<OrbState>('idle');
+  const [statusText, setStatusText] = useState("Tap to begin your mindful journey");
+  const [showHelpline, setShowHelpline] = useState(false);
+  
+  const isConversationActive = useRef(false);
+  const shouldLoop = useRef(true); 
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const speechStartTime = useRef<number>(0);
+  const recordingStartTime = useRef<number>(0); // To track Grace Period
 
-  const isConversationActive = useRef(false); 
+  // --- FALLBACK: BROWSER NATIVE TTS ---
+  const speakWithBrowser = (text: string) => {
+    console.log("Using Browser TTS Fallback");
+    
+    // Cancel any active speech
+    window.speechSynthesis.cancel();
 
-  // 1. SILENCE DETECTION HOOK
-  useSilenceDetection(stream, () => {
-    // Only stop if we are actually recording
-    if (isRecording) {
-      console.log("Silence detected... Auto-sending.");
-      stopRecording();
-    }
-  });
+    const utterance = new SpeechSynthesisUtterance(text);
+    
+    // Optional: Try to find a better voice (Google/Female)
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(v => v.name.includes("Google") && v.name.includes("Female")) || voices[0];
+    if (preferredVoice) utterance.voice = preferredVoice;
 
-  const handleToggleRecord = () => {
-    if (isRecording) {
-      isConversationActive.current = false; // User manually stopped
-      stopRecording();
-      setStatus("Paused");
-    } else {
-      isConversationActive.current = true; // User started session
-      startRecording();
-      setStatus("Listening...");
-    }
+    // Tweak to sound slightly less robotic
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+
+    utterance.onstart = () => {
+      setOrbState('speaking');
+      setStatusText("Speaking (Dev Mode)...");
+      speechStartTime.current = Date.now();
+      // Important: Keep barge-in active
+      if (!isRecording) startRecording();
+    };
+
+    utterance.onend = () => {
+      if (shouldLoop.current) {
+        setOrbState('listening');
+        setStatusText("Listening...");
+        if (!isRecording) startRecording();
+      } else {
+        setOrbState('idle');
+        setStatusText("Tap mic to resume");
+        stopRecording();
+      }
+    };
+
+    utterance.onerror = (e) => {
+      console.error("Browser TTS Error:", e);
+      setOrbState('idle');
+    };
+
+    window.speechSynthesis.speak(utterance);
   };
 
+  // 1. SILENCE DETECTION (Auto = LOOP)
+  useSilenceDetection(
+    currentVolume, 
+    () => {
+      // Grace Period Check: Ignore silence for first 1.5s
+      const timeSinceStart = Date.now() - recordingStartTime.current;
+      if (timeSinceStart < 1500) { 
+        console.log("Ignoring initial silence (Grace Period)");
+        return; 
+      }
+
+      console.log("Silence detected. Auto-sending.");
+      shouldLoop.current = true; // <--- AUTO = KEEP LOOPING
+      stopRecording();
+    },
+    30,   // Threshold
+    2500, // Duration
+    orbState === 'listening' // Enabled only when listening
+  );
+
+  // 2. BUTTON HANDLER (Manual = NO LOOP)
+  const handleToggleInteraction = () => {
+    if (orbState === 'thinking') {
+      console.log("User clicked during thinking -> Cancelling loop");
+      shouldLoop.current = false; 
+      return; 
+    }
+
+    if (orbState === 'speaking') {
+      shouldLoop.current = false;
+      
+      // Stop Audio
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      window.speechSynthesis.cancel();
+
+      setOrbState('idle'); 
+      setStatusText("Finishing thought...");
+      return;
+    }
+
+    if (orbState === 'listening') {
+      shouldLoop.current = false; // <--- EXPLICITLY DISABLE LOOP
+      stopRecording(); 
+      return;
+    }
+
+    // CASE D: Start Fresh
+    shouldLoop.current = true;
+    isConversationActive.current = true;
+    recordingStartTime.current = Date.now(); // Set Grace Period Start
+    startRecording();
+    setOrbState('listening'); 
+    setStatusText("Listening...");
+  };
+
+  // 3. BARGE-IN (Voice Interrupt = LOOP)
+  useEffect(() => {
+    // Threshold set to 25 based on your testing
+    if (orbState === 'speaking' && currentVolume > 25) {
+       const timeSpeaking = Date.now() - speechStartTime.current;
+       if (timeSpeaking < 500) return; // Prevent instant echo trigger
+
+       console.log("Barge-in detected! Stopping AI.");
+       
+       // Stop Premium Audio
+       if (audioRef.current) {
+         audioRef.current.pause();
+         audioRef.current = null;
+       }
+       // Stop Browser Audio
+       window.speechSynthesis.cancel();
+
+       shouldLoop.current = true; // <--- INTERRUPT = KEEP LOOPING
+       isConversationActive.current = true;
+       recordingStartTime.current = Date.now(); // Reset Grace Period
+       startRecording();
+       setOrbState('listening');
+       setStatusText("Listening...");
+    }
+  }, [currentVolume, orbState, startRecording]);
+
   const playAudioResponse = async (text: string, voiceId: string) => {
+    if (!text || text.trim() === "") {
+        console.warn("TTS Error: No text to speak.");
+        setOrbState('idle');
+        return;
+    }
+
+    // 1. CHECK SAFETY SWITCH
+    if (!USE_PREMIUM_VOICE) {
+        console.log("Dev Mode: Using Browser Voice to save credits.");
+        speakWithBrowser(text);
+        return;
+    }
+
     try {
       const response = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, voiceId }),
       });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("TTS API Error:", errorData);
+        throw new Error(errorData.error || "TTS request failed");
+      }
+
       const blob = await response.blob();
+      
+      if (blob.size < 100) {
+        console.error("TTS Error: Audio blob is suspiciously small.");
+        setOrbState('idle');
+        return;
+      }
+
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
       
-      // 2. AUTO-RESUME LOGIC
+      audioRef.current = audio; 
+
       audio.onended = () => {
-        if (isConversationActive.current) {
-          setStatus("Listening...");
-          startRecording(); // <--- The Loop!
+        if (shouldLoop.current) {
+          setOrbState('listening');
+          setStatusText("Listening...");
+          if (!isRecording) startRecording();
         } else {
-          setStatus("Tap to talk");
+          setOrbState('idle');
+          setStatusText("Tap mic to resume");
+          stopRecording();
         }
       };
       
-      audio.play();
+      audio.onerror = (e) => {
+        console.error("Audio Playback Error:", e);
+        setOrbState('idle');
+      };
+
+      setOrbState('speaking');
+      setStatusText("Speaking...");
+      speechStartTime.current = Date.now();
+      
+      await audio.play();
+
+      if (!isRecording) startRecording(); 
+
     } catch (error) {
-      console.error("Audio playback failed", error);
-      setStatus("Error playing audio");
+      console.warn("Play Audio Failed (Switching to Fallback):", error);
+      // Fallback in case Premium fails unexpectedly
+      speakWithBrowser(text);
     }
   };
 
+  // 4. API HANDLER
   useEffect(() => {
     if (audioBlob) {
-      setStatus("Thinking...");
+      // Guard: If we manually exited while idle, ignore cleanup blobs
+      if (orbState === 'idle') return;
+
+      setOrbState('thinking');
+      setStatusText("Thinking...");
       
       sendAudioToVertex(audioBlob, history)
         .then((data) => {
-          setStatus(data.mode === 'INTERVIEWER' ? "Interviewing..." : "Speaking...");
+          if (data.mode === 'INTERVIEWER') setStatusText("Interview Mode");
           
-          // CRISIS CHECK
-          if (data.isCrisis) {
-            alert("CRISIS DETECTED: Please call 988 or your local emergency number immediately.");
-            // Stop the auto-loop here
-            isConversationActive.current = false; 
-          }
+          if (data.isCrisis) setShowHelpline(true);
+          else setShowHelpline(false);
 
           addToHistory(data.transcript, data.reply);
           playAudioResponse(data.reply, data.voiceId);
         })
         .catch((err) => {
-          setStatus("Connection Error");
-          console.error(err);
-          isConversationActive.current = false; // Stop loop on error
+          console.error("Vertex Error:", err);
+          setStatusText("Connection Error");
+          setOrbState('idle');
         });
     }
-  }, [audioBlob])
+  }, [audioBlob]);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white p-4">
-      {/* Brand Header */}
-      <div className="absolute top-8 flex flex-col items-center">
-        <h1 className="text-4xl font-bold bg-gradient-to-r from-cyan-400 to-blue-600 bg-clip-text text-transparent">
-          Mood-Mantra
-        </h1>
-        <p className="text-slate-500 text-xs mt-2 uppercase tracking-widest">
-          Secure • Private • Local
-        </p>
-      </div>
-      
-      {/* The Visual Centerpiece */}
-      <div className="flex flex-col items-center gap-8">
-        <StatusDisplay status={status} />
-        
-        <RecordButton 
-          isRecording={isRecording} 
-          onToggle={handleToggleRecord} 
-        />
-        
-        {/* Helper text for user */}
-        {isRecording && (
-          <p className="text-xs text-slate-500 animate-pulse">
-            Hands-free mode active. Just speak naturally.
-          </p>
-        )}
+    <div className="relative flex flex-col items-center justify-center min-h-screen bg-slate-950 overflow-hidden">
+        {/* Background */}
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,var(--tw-gradient-stops))] from-violet-900/20 via-slate-950 to-slate-950"></div>
 
+        {/* Header */}
+        <div className="absolute top-8 z-30 flex flex-col items-center pointer-events-none transition-opacity duration-500">
+            <h1 className={`font-serif text-4xl sm:text-5xl lg:text-6xl font-bold bg-linear-to-r from-teal-200 via-cyan-200 to-violet-300 bg-clip-text text-transparent tracking-tight transition-all duration-700 ease-out ${orbState !== 'idle' ? 'opacity-40 scale-95' : 'opacity-100 scale-100'}`}>
+            Mood-Mantra
+            </h1>
+            <p className="mt-3 sm:mt-4 text-sm sm:text-base text-slate-400 font-light max-w-md sm:max-w-lg transition-all duration-500">
+            {statusText}
+            </p>
+        </div>
 
-        {history.length > 0 && (
-          <button 
-            onClick={clearHistory}
-            className="text-xs text-slate-600 hover:text-red-400 mt-12 transition-colors"
-          >
-            Clear Memory
-          </button>
+        {/* Orb Container - Faster transition for instant feel */}
+        <div className={`relative z-10 w-full h-screen max-h-[600px] mb-32 transition-all duration-300 ease-out ${orbState === 'idle' ? 'opacity-0 scale-90 blur-sm pointer-events-none' : 'opacity-100 scale-100 blur-0'}`}>
+            <ParticleOrb state={orbState} />
+        </div>
+
+        {/* Button */}
+        <div className="absolute bottom-20 z-50">
+            <RecordButton 
+              isRecording={orbState === 'listening'} 
+              onToggle={handleToggleInteraction} 
+            />
+        </div>
+
+        {/* Helpline */}
+        <div className={`absolute bottom-40 z-40 transition-all duration-1000 ease-out transform ${showHelpline ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10 pointer-events-none'}`}>
+            <a href="tel:988" className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/30 backdrop-blur-md px-6 py-3 rounded-full text-rose-200 text-sm font-medium hover:bg-rose-500/20 transition-colors shadow-lg shadow-rose-900/20">
+            <span>❤️</span>
+            <span>You matter. Professional help is here.</span>
+            </a>
+        </div>
+
+        {/* Reset */}
+        {history.length > 0 && orbState === 'idle' && (
+            <button 
+            onClick={(e) => {
+                e.stopPropagation();
+                clearHistory();
+                window.location.reload();
+            }}
+            className="absolute bottom-8 z-30 text-[10px] text-slate-700 hover:text-red-400 transition-colors uppercase tracking-widest"
+            >
+            Reset
+            </button>
         )}
-      </div>
     </div>
   );
 }
