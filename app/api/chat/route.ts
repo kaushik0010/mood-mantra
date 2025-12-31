@@ -5,10 +5,22 @@ import { headers } from 'next/headers';
 import { getVoiceId } from '@/config/voices';
 import { rateLimit } from '@/utils/rate-limit';
 
+let googleAuthOptions;
+
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS);
+    googleAuthOptions = { credentials };
+  } catch (e) {
+    console.error("Failed to parse GCP key:", e);
+  }
+}
+
 // 1. SETUP VERTEX AI
 const vertex_ai = new VertexAI({
   project: process.env.GCP_PROJECT_ID,
   location: process.env.GCP_LOCATION,
+  googleAuthOptions: googleAuthOptions
 });
 
 const model = vertex_ai.preview.getGenerativeModel({
