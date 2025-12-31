@@ -9,8 +9,8 @@ import { ParticleOrb } from '@/components/mantra/ParticleOrb';
 import { RecordButton } from '@/components/mantra/RecordButton';
 
 // --- CONFIGURATION ---
-// Set to TRUE only for the final demo recording to use ElevenLabs
-const USE_PREMIUM_VOICE = false; 
+// Set to TRUE only to use ElevenLabs credits
+const USE_PREMIUM_VOICE = true; 
 
 type OrbState = 'idle' | 'listening' | 'speaking' | 'thinking';
 

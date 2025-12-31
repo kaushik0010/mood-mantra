@@ -7,7 +7,7 @@
 [![Voice](https://img.shields.io/badge/TTS-ElevenLabs-white)](https://elevenlabs.io/)
 [![PWA](https://img.shields.io/badge/PWA-Installable-purple)](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps)
 
-## 📖 Overview
+## 📖 Overview  
 
 **Mood-Mantra** is a voice-first, empathetic AI companion designed to bridge the gap between "wellness apps" and "clinical therapy."
 
